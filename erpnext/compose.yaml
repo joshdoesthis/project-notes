@@ -1,0 +1,299 @@
+version: "3.8"
+
+x-deploy-defaults: &deploy-defaults
+  deploy:
+    restart_policy:
+      condition: on-failure
+
+x-frappe-defaults: &frappe-defaults
+  <<: *deploy-defaults
+  build:
+    context: .
+    dockerfile_inline: |
+      FROM ubuntu:23.04
+      RUN useradd -ms /bin/bash frappe
+      RUN touch ~/.bashrc
+      RUN chmod +x ~/.bashrc
+      RUN apt-get update
+      RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          python3 \
+          python3-dev \
+          python3-venv \
+          python3-pip \
+          python3-setuptools \
+          python3-wheel \
+          supervisor \
+          git \
+          sudo \
+          cron \
+          fail2ban \
+          certbot \
+          nginx \
+          gettext-base \
+          libpango-1.0-0 \
+          libharfbuzz0b \
+          libpangoft2-1.0-0 \
+          libpangocairo-1.0-0 \
+          redis-server \
+          mariadb-client \
+          xvfb \
+          libfontconfig \
+          wkhtmltopdf \
+          ca-certificates \
+          gnupg \
+          curl \
+          build-essential \
+          libssl-dev
+      RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+          sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+      RUN echo deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main | \
+          sudo tee /etc/apt/sources.list.d/nodesource.list
+      RUN apt-get update
+      RUN apt-get install -y nodejs
+      RUN npm install -g yarn
+      RUN pip3 install frappe-bench
+      RUN git clone https://github.com/frappe/frappe_docker.git
+      RUN mkdir -p /templates/nginx
+      RUN cp frappe_docker/resources/nginx-template.conf /templates/nginx/frappe.conf.template
+      RUN cp frappe_docker/resources/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
+      RUN chmod 755 /usr/local/bin/nginx-entrypoint.sh
+      RUN chmod 644 /templates/nginx/frappe.conf.template
+      RUN echo "frappe ALL=(ALL) NOPASSWD: /usr/local/bin/nginx-entrypoint.sh" >> /etc/sudoers
+      RUN rm -rf frappe_docker
+      RUN rm -rf /var/lib/apt/lists/*
+      RUN rm -fr /etc/nginx/sites-enabled/default
+      RUN sed -i "/user www-data/d" /etc/nginx/nginx.conf
+      RUN ln -sf /dev/stdout /var/log/nginx/access.log
+      RUN ln -sf /dev/stderr /var/log/nginx/error.log
+      RUN touch /run/nginx.pid
+      RUN chown -R frappe:frappe /etc/nginx/conf.d
+      RUN chown -R frappe:frappe /etc/nginx/nginx.conf
+      RUN chown -R frappe:frappe /var/log/nginx
+      RUN chown -R frappe:frappe /var/lib/nginx
+      RUN chown -R frappe:frappe /run/nginx.pid
+      USER frappe
+      RUN echo "export PATH=$PATH:/usr/local/bin" >> ~/.bashrc
+      RUN . ~/.bashrc
+      WORKDIR /home/frappe
+      RUN bench init frappe-bench \
+        --no-procfile \
+        --no-backups \
+        --skip-redis-config-generation \
+        --verbose
+      WORKDIR /home/frappe/frappe-bench
+      CMD /home/frappe/frappe-bench/env/bin/gunicorn \
+        --chdir=/home/frappe/frappe-bench/sites \
+        --bind=0.0.0.0:8000 \
+        --threads=4 \
+        --workers=2 \
+        --worker-class=gthread \
+        --worker-tmp-dir=/dev/shm \
+        --timeout=120 \
+        --preload frappe.app:application
+  volumes:
+    - frappe:/home/frappe
+
+services:
+  mariadb:
+    <<: *deploy-defaults
+    image: mariadb:11
+    healthcheck:
+      test: healthcheck.sh --connect --innodb_initialized
+      start_period: 10s
+      start_interval: 10s
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    volumes:
+      - mariadb:/var/lib/mysql
+
+  redis-cache:
+    <<: *deploy-defaults
+    image: redis:7.2.3
+    healthcheck:
+      test: redis-cli ping
+      start_period: 10s
+      start_interval: 10s
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - redis-cache:/data
+
+  redis-queue:
+    <<: *deploy-defaults
+    image: redis:7.2.3
+    healthcheck:
+      test: redis-cli ping
+      start_period: 10s
+      start_interval: 10s
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - redis-queue:/data
+
+  redis-socketio:
+    <<: *deploy-defaults
+    image: redis:7.2.3
+    healthcheck:
+      test: redis-cli ping
+      start_period: 10s
+      start_interval: 10s
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - redis-socketio:/data
+
+  configure:
+    <<: [*frappe-defaults, *deploy-defaults]
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+      redis-socketio:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      REDIS_SOCKETIO: redis-socketio:6379
+      SOCKETIO_PORT: 9000
+    entrypoint: /bin/bash -c
+    command:
+      - |
+        bench set-config -g db_host $$DB_HOST
+        bench set-config -g db_port $$DB_PORT
+        bench set-config -g redis_cache redis://$$REDIS_CACHE
+        bench set-config -g redis_queue redis://$$REDIS_QUEUE
+        bench set-config -g redis_socketio redis://$$REDIS_SOCKETIO
+        bench set-config -g socketio_port $$SOCKETIO_PORT
+
+  create-site:
+    <<: *frappe-defaults
+    deploy:
+      restart_policy:
+        condition: none
+    depends_on:
+      configure:
+        condition: service_completed_successfully
+    environment:
+      SOCKETIO_PORT: 9000
+      SITE_NAME: ${SITE_NAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    entrypoint: /bin/bash -c
+    command:
+      - |
+        if [ ! -d "sites/$$SITE_NAME" ]
+        then
+          bench new-site $$SITE_NAME \
+            --admin-password $$ADMIN_PASSWORD \
+            --db-root-password $$DB_ROOT_PASSWORD \
+            --no-mariadb-socket
+        fi
+
+  install-apps:
+    <<: *frappe-defaults
+    deploy:
+      restart_policy:
+        condition: none
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    entrypoint: /bin/bash -c
+    command:
+      - |
+        for app in $$(echo $$CUSTOM_APPS | tr "," "\n")
+        do
+          if [ ! -d "apps/$$app" ]
+          then
+            bench --site $$SITE_NAME migrate
+            bench get-app $$app
+            bench --site $$SITE_NAME install-app $$app
+          fi
+        done
+
+  migrate:
+    <<: *frappe-defaults
+    deploy:
+      restart_policy:
+        condition: none
+    depends_on:
+      install-apps:
+        condition: service_completed_successfully
+    entrypoint: /bin/bash -c
+    command:
+      - |
+        if [ "$$MIGRATE" = "1" ] || [ "$$MIGRATE" = "true" ]
+        then
+          echo "Migrating $$SITE_NAME"
+          bench --site $$SITE_NAME migrate
+        else
+          echo "Skipping migration"
+        fi
+
+  schedule:
+    <<: [*frappe-defaults, *deploy-defaults]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: bench schedule
+
+  queue:
+    <<: [*frappe-defaults, *deploy-defaults]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: bench worker --queue long,short,default
+
+  backend:
+    <<: [*frappe-defaults, *deploy-defaults]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  websocket:
+    <<: [*frappe-defaults, *deploy-defaults]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
+
+  frontend:
+    <<: [*frappe-defaults, *deploy-defaults]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME}
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    command: nginx-entrypoint.sh
+    ports:
+      - 8080
+
+volumes:
+  frappe:
+  mariadb:
+  redis-cache:
+  redis-queue:
+  redis-socketio:
