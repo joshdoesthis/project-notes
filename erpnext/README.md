@@ -9,10 +9,12 @@
 1. Run `cp env-example .env` and fill in the values
 2. Run `docker compose up -d` to start the containers
 3. Wait for the containers to start up... this might take a while... you can follow the logs with `docker compose logs -f`
-4. Open `http://localhost:8080` in your browser
+4. Run `docker compose exec frontend bench --site <site> set-admin-password <password>` to change the default admin password
+5. Open `http://localhost:8080` in your browser
 
 # Resources
 
+- [Bench Commands](https://frappeframework.com/docs/user/en/bench/bench-commands)
 - [ERPNext on GitHub](https://github.com/frappe/erpnext)
 - [ERPNext Documentation](https://docs.erpnext.com)
 - [ERPNext on Docker Hub](https://hub.docker.com/u/frappe)

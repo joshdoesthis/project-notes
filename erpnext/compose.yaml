@@ -10,7 +10,7 @@ x-frappe-defaults: &frappe-defaults
   build:
     context: .
     dockerfile_inline: |
-      FROM ubuntu:23.04
+      FROM debian:bookworm-slim
       RUN useradd -ms /bin/bash frappe
       RUN touch ~/.bashrc
       RUN chmod +x ~/.bashrc
@@ -51,7 +51,7 @@ x-frappe-defaults: &frappe-defaults
       RUN apt-get update
       RUN apt-get install -y nodejs
       RUN npm install -g yarn
-      RUN pip3 install frappe-bench
+      RUN pip3 install frappe-bench --break-system-packages
       RUN git clone https://github.com/frappe/frappe_docker.git
       RUN mkdir -p /templates/nginx
       RUN cp frappe_docker/resources/nginx-template.conf /templates/nginx/frappe.conf.template
@@ -193,7 +193,6 @@ services:
     environment:
       SOCKETIO_PORT: 9000
       SITE_NAME: ${SITE_NAME}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     entrypoint: /bin/bash -c
     command:
@@ -201,7 +200,7 @@ services:
         if [ ! -d "sites/$$SITE_NAME" ]
         then
           bench new-site $$SITE_NAME \
-            --admin-password $$ADMIN_PASSWORD \
+            --admin-password admin \
             --db-root-password $$DB_ROOT_PASSWORD \
             --no-mariadb-socket
         fi
@@ -236,15 +235,7 @@ services:
       install-apps:
         condition: service_completed_successfully
     entrypoint: /bin/bash -c
-    command:
-      - |
-        if [ "$$MIGRATE" = "1" ] || [ "$$MIGRATE" = "true" ]
-        then
-          echo "Migrating $$SITE_NAME"
-          bench --site $$SITE_NAME migrate
-        else
-          echo "Skipping migration"
-        fi
+    command: bench --site $$SITE_NAME migrate
 
   schedule:
     <<: [*frappe-defaults, *deploy-defaults]
